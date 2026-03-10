@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	einotool "github.com/cloudwego/eino/components/tool"
-	toolutils "github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -45,23 +46,12 @@ func BuildMVPTools(workingDir string) ([]einotool.BaseTool, error) {
 	// toolSet 持有共享运行时上下文（当前仅 workingDir）。
 	ts := &toolSet{workingDir: wd}
 
-	// InferTool 会基于入参结构体自动生成 JSON Schema，减少手写 schema 成本。
-	readFileTool, err := toolutils.InferTool("read_file", "Read file content by path", ts.readFile)
-	if err != nil {
-		return nil, fmt.Errorf("build read_file tool: %w", err)
-	}
-
-	listDirTool, err := toolutils.InferTool("list_dir", "List directory entries by path", ts.listDir)
-	if err != nil {
-		return nil, fmt.Errorf("build list_dir tool: %w", err)
-	}
-
-	runShellTool, err := toolutils.InferTool("run_shell", "Run a shell command in project working directory", ts.runShell)
-	if err != nil {
-		return nil, fmt.Errorf("build run_shell tool: %w", err)
-	}
-
-	return []einotool.BaseTool{readFileTool, listDirTool, runShellTool}, nil
+	// 采用显式标准 Tool 实现，便于自定义 ToolInfo 与执行逻辑。
+	return []einotool.BaseTool{
+		&readFileTool{set: ts},
+		&listDirTool{set: ts},
+		&runShellTool{set: ts},
+	}, nil
 }
 
 // toolSet 聚合工具实现需要共享的上下文状态。
@@ -71,6 +61,100 @@ type toolSet struct {
 	// - read_file/list_dir 的相对路径基于该目录解析
 	// - run_shell 的命令在该目录中执行
 	workingDir string
+}
+
+type readFileTool struct {
+	set *toolSet
+}
+
+func (t *readFileTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "read_file",
+		Desc: "Read file content by path",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"path": {
+				Type:     schema.String,
+				Desc:     "Path to the file",
+				Required: true,
+			},
+		}),
+	}, nil
+}
+
+func (t *readFileTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
+	var in readFileInput
+	if err := parseArguments(argumentsInJSON, &in); err != nil {
+		return "", fmt.Errorf("read_file invalid arguments: %w", err)
+	}
+	return t.set.readFile(ctx, in)
+}
+
+type listDirTool struct {
+	set *toolSet
+}
+
+func (t *listDirTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "list_dir",
+		Desc: "List directory entries by path",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"path": {
+				Type:     schema.String,
+				Desc:     "Path to directory",
+				Required: true,
+			},
+		}),
+	}, nil
+}
+
+func (t *listDirTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
+	var in listDirInput
+	if err := parseArguments(argumentsInJSON, &in); err != nil {
+		return "", fmt.Errorf("list_dir invalid arguments: %w", err)
+	}
+	return t.set.listDir(ctx, in)
+}
+
+type runShellTool struct {
+	set *toolSet
+}
+
+func (t *runShellTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "run_shell",
+		Desc: "Run a shell command in project working directory",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"command": {
+				Type:     schema.String,
+				Desc:     "Shell command to run",
+				Required: true,
+			},
+			"timeout_sec": {
+				Type: schema.Integer,
+				Desc: "Timeout seconds, default 20, max 60",
+			},
+		}),
+	}, nil
+}
+
+func (t *runShellTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
+	var in runShellInput
+	if err := parseArguments(argumentsInJSON, &in); err != nil {
+		return "", fmt.Errorf("run_shell invalid arguments: %w", err)
+	}
+	return t.set.runShell(ctx, in)
+}
+
+func parseArguments(argumentsInJSON string, dst any) error {
+	arguments := strings.TrimSpace(argumentsInJSON)
+	if arguments == "" {
+		return errors.New("arguments are required")
+	}
+
+	if err := json.Unmarshal([]byte(arguments), dst); err != nil {
+		return fmt.Errorf("arguments must be valid json: %w", err)
+	}
+	return nil
 }
 
 // readFileInput 是 read_file 的 JSON 入参结构。
@@ -118,12 +202,12 @@ type listDirInput struct {
 // - string: 按字典序拼接后的条目文本（每行一个）
 // - error: 参数缺失或目录读取失败时返回
 func (t *toolSet) listDir(_ context.Context, in listDirInput) (string, error) {
-	if strings.TrimSpace(in.Path) == "" {
+	if strings.TrimSpace(in.Path) == "" {// 空路径没有意义，直接报错。
 		return "", errors.New("path is required")
 	}
 
-	absPath := t.resolvePath(in.Path)
-	entries, err := os.ReadDir(absPath)
+	absPath := t.resolvePath(in.Path)// 解析为绝对路径，确保工具行为一致且安全。
+	entries, err := os.ReadDir(absPath)// 读取目录条目列表，失败时返回错误。
 	if err != nil {
 		return "", fmt.Errorf("list_dir failed: %w", err)
 	}
