@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -44,11 +47,24 @@ func NewReactRunner(ctx context.Context, chatModel model.ToolCallingChatModel, t
 		maxStep = 6
 	}
 
+	toolNames, err := collectToolNames(ctx, tools)
+	if err != nil {
+		return nil, fmt.Errorf("collect tool names: %w", err)
+	}
+
 	// ReAct Agent 由 ToolCallingModel + ToolsNode + MaxStep 组成。
 	ragent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: chatModel,
 		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: tools,
+			Tools:                tools,
+			UnknownToolsHandler:  buildUnknownToolsHandler(toolNames),
+			ExecuteSequentially:  true,
+			ToolArgumentsHandler: toolArgumentsHandler,
+			ToolCallMiddlewares: []compose.ToolMiddleware{
+				{
+					Invokable: wrapInvokableToolErrors,
+				},
+			},
 		},
 		MaxStep: maxStep,
 	})
@@ -57,6 +73,53 @@ func NewReactRunner(ctx context.Context, chatModel model.ToolCallingChatModel, t
 	}
 
 	return &ReactRunner{agent: ragent, maxStep: maxStep}, nil
+}
+
+func collectToolNames(ctx context.Context, tools []einotool.BaseTool) ([]string, error) {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		info, err := t.Info(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if info == nil || strings.TrimSpace(info.Name) == "" {
+			continue
+		}
+		names = append(names, info.Name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func buildUnknownToolsHandler(knownTools []string) func(ctx context.Context, name, input string) (string, error) {
+	known := strings.Join(knownTools, ", ")
+	return func(_ context.Context, name, _ string) (string, error) {
+		if known == "" {
+			return fmt.Sprintf("unknown tool %q", name), nil
+		}
+		return fmt.Sprintf("unknown tool %q. Available tools: %s", name, known), nil
+	}
+}
+
+func toolArgumentsHandler(_ context.Context, name, arguments string) (string, error) {
+	trimmed := strings.TrimSpace(arguments)
+	if trimmed == "" {
+		return "", fmt.Errorf("tool %q arguments are required", name)
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return "", fmt.Errorf("tool %q arguments must be valid JSON", name)
+	}
+	return trimmed, nil
+}
+
+func wrapInvokableToolErrors(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+	return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+		out, err := next(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q failed (call_id=%s): %w", input.Name, input.CallID, err)
+		}
+		return out, nil
+	}
 }
 
 // Run 触发一次 ReAct 执行并返回最终消息。
