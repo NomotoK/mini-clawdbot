@@ -12,12 +12,12 @@ import (
 func TestReadFileSuccessAndNotFound(t *testing.T) {
 	tmp := t.TempDir()
 	file := filepath.Join(tmp, "a.txt")
-	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {// 创建测试文件，失败时直接报错。
 		t.Fatalf("write file: %v", err)
 	}
 
-	ts := &toolSet{workingDir: tmp}
-	out, err := ts.readFile(context.Background(), readFileInput{Path: "a.txt"})
+	ts := &toolSet{workingDir: tmp}// 初始化工具集，设置工作目录为临时目录。
+	out, err := ts.readFile(context.Background(), readFileInput{Path: "a.txt"})// 读取文件内容，验证成功分支。
 	if err != nil {
 		t.Fatalf("read file failed: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestReadFileSuccessAndNotFound(t *testing.T) {
 		t.Fatalf("unexpected content: %q", out)
 	}
 
-	_, err = ts.readFile(context.Background(), readFileInput{Path: "missing.txt"})
+	_, err = ts.readFile(context.Background(), readFileInput{Path: "missing.txt"})// 尝试读取不存在的文件，验证错误分支。
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
@@ -34,7 +34,7 @@ func TestReadFileSuccessAndNotFound(t *testing.T) {
 // TestListDirInvalidPath 验证 list_dir 对非法目录路径会返回错误。
 func TestListDirInvalidPath(t *testing.T) {
 	ts := &toolSet{workingDir: t.TempDir()}
-	_, err := ts.listDir(context.Background(), listDirInput{Path: "not-exists"})
+	_, err := ts.listDir(context.Background(), listDirInput{Path: "not-exists"})// 尝试列出不存在的目录，验证错误分支。
 	if err == nil {
 		t.Fatal("expected list_dir error")
 	}
