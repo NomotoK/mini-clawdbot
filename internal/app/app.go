@@ -33,7 +33,7 @@ type App struct {
 	session *session.MemorySession
 }
 
-// New 通过环境变量初始化完整应用依赖。
+// New 通过“.env + 环境变量”初始化完整应用依赖。
 //
 // 参数：
 // - ctx: 初始化上下文
@@ -41,8 +41,25 @@ type App struct {
 //
 // 返回：
 // - *App: 可执行 RunOnce 的应用实例
-// - error: 配置加载、模型初始化或工具构建失败时返回
+// - error: .env 读取、配置加载、模型初始化或工具构建失败时返回
 func New(ctx context.Context, opts Options) (*App, error) {
+	// 当前工作目录会作为工具执行目录，同时用于向上定位项目根目录。
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("get working directory: %w", err)
+	}
+
+	// 自动加载项目根目录 .env（若不存在则忽略）。
+	// 若未找到项目根目录，则退化为在当前工作目录查找 .env。
+	root, rootErr := ResolveProjectRoot(wd)
+	dotenvPath := filepath.Join(wd, ".env")
+	if rootErr == nil {
+		dotenvPath = filepath.Join(root, ".env")
+	}
+	if err := config.LoadDotEnvIfExists(dotenvPath); err != nil {
+		return nil, err
+	}
+
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		return nil, err
@@ -52,12 +69,6 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	chatModel, err := llm.NewToolCallingModel(ctx, cfg)
 	if err != nil {
 		return nil, err
-	}
-
-	// 当前工作目录会作为工具执行目录（run_shell/read_file/list_dir 的基准）。
-	wd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
 	return NewWithDependencies(ctx, chatModel, opts.MaxStep, wd)

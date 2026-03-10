@@ -15,6 +15,24 @@
 - `MINI_CLAW_MODEL`（可选，默认 `gpt-4o-mini`）
 - `MINI_CLAW_TIMEOUT_SEC`（可选，默认 `60`）
 
+## .env 自动加载
+
+启动时会自动读取项目根目录下的 `.env` 文件（如果存在），并注入环境变量。
+
+示例 `.env`：
+
+```dotenv
+MINI_CLAW_API_KEY=your_api_key
+MINI_CLAW_BASE_URL=https://api.openai.com/v1
+MINI_CLAW_MODEL=gpt-4o-mini
+MINI_CLAW_TIMEOUT_SEC=60
+```
+
+优先级说明：
+
+- 已经在 shell 中导出且值非空的环境变量优先级更高（不会被 `.env` 覆盖）
+- `.env` 会补充未设置或值为空的变量
+
 ## 运行
 
 ```bash
