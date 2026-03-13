@@ -107,7 +107,7 @@ func collectToolNames(ctx context.Context, tools []einotool.BaseTool) ([]string,
 	sort.Strings(names)
 	return names, nil
 }
-
+// buildUnknownToolsHandler 构建一个处理未知工具调用的函数，返回可用工具列表提示。
 func buildUnknownToolsHandler(knownTools []string) func(ctx context.Context, name, input string) (string, error) {
 	known := strings.Join(knownTools, ", ")
 	return func(_ context.Context, name, _ string) (string, error) {
@@ -117,7 +117,7 @@ func buildUnknownToolsHandler(knownTools []string) func(ctx context.Context, nam
 		return fmt.Sprintf("unknown tool %q. Available tools: %s", name, known), nil
 	}
 }
-
+// toolArgumentsHandler 验证工具调用参数的合法性，要求非空且为有效 JSON。
 func toolArgumentsHandler(_ context.Context, name, arguments string) (string, error) {
 	trimmed := strings.TrimSpace(arguments)
 	if trimmed == "" {

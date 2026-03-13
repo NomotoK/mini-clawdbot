@@ -38,10 +38,10 @@ func (c ManagerConfig) normalize() ManagerConfig {
 
 // AgentManager 消费 inbound，按 session worker 串行执行并发布 outbound。
 type AgentManager struct {
-	bus     *bus.MessageBus
+	bus     *bus.MessageBus //消息总线，用于订阅 inbound 和发布 outbound
 	router  *router.SessionRouter
 	runner  *ReactRunner
-	store   session.Store
+	store   session.Store //会话存储，用于保存和查询 session 历史消息
 	cfg     ManagerConfig
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -72,7 +72,7 @@ func NewAgentManager(messageBus *bus.MessageBus, sessionRouter *router.SessionRo
 	}
 }
 
-// Start 启动 inbound 消费主循环。
+// Start 启动 AgentManager，开始消费 inbound 消息并处理。
 func (m *AgentManager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -176,7 +176,7 @@ func (m *AgentManager) getOrCreateWorker(key bus.SessionKey) *sessionWorker {
 	m.workers[key] = worker
 
 	m.wg.Add(1)
-	go m.runWorker(m.ctx, worker)
+	go m.runWorker(m.ctx, worker)// 启动goroutine处理对应 session 的消息队列并执行 ReAct
 	return worker
 }
 // runWorker 是 session worker 的主循环，处理对应 session 的消息队列并执行 ReAct。
@@ -221,7 +221,7 @@ func (m *AgentManager) cleanupWorker(key bus.SessionKey, target *sessionWorker) 
 		delete(m.workers, key)
 	}
 }
-
+// expireWorkerIfIdle 检查 worker 是否空闲超时，若是则关闭并从 manager 中移除。返回值表示是否已过期。(超时时间：workerIdleTTL)
 func (m *AgentManager) expireWorkerIfIdle(key bus.SessionKey, target *sessionWorker) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -241,7 +241,7 @@ func (m *AgentManager) handleInbound(ctx context.Context, key bus.SessionKey, in
 	userMsg := schema.UserMessage(inbound.Content)
 	m.store.Add(key, userMsg)
 
-	history := m.store.Messages(key)
+	history := m.store.Messages(key)// 获取当前会话历史消息
 	finalMsg, trace, err := m.runner.RunWithTrace(ctx, history)
 	if err != nil {
 		_ = m.bus.PublishError(ctx, &bus.ErrorEvent{
@@ -253,14 +253,15 @@ func (m *AgentManager) handleInbound(ctx context.Context, key bus.SessionKey, in
 		})
 		return
 	}
-	m.store.Add(key, finalMsg)
+	m.store.Add(key, finalMsg)//向会话存储添加 ReAct 最终输出消息，保持会话历史完整
 
-	content := strings.TrimSpace(finalMsg.Content)
+	content := strings.TrimSpace(finalMsg.Content)// content是 ReAct 最终输出消息的文本内容，通常为 assistant 回复的文本
+	//如果 content 为空，则使用 role 和原始 content 的格式化字符串作为保底输出。
 	if content == "" {
 		content = fmt.Sprintf("role=%s content=%q", finalMsg.Role, finalMsg.Content)
 	}
 
-	metadata := map[string]any{
+	metadata := map[string]any{// metadata 是附加在 outbound 消息上的元信息，包含 ReAct 执行的跟踪事件数量和 session key
 		"trace_events": len(trace.Events),
 		"session_key":  string(key),
 	}
@@ -282,7 +283,7 @@ func (m *AgentManager) workerCount() int {
 	defer m.mu.Unlock()
 	return len(m.workers)
 }
-
+// enqueue 将 inbound 消息入队到 session worker。
 func (w *sessionWorker) enqueue(ctx context.Context, msg *bus.InboundMessage) bool {
 	w.mu.Lock()
 	if w.closed {

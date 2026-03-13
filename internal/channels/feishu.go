@@ -95,7 +95,7 @@ func (a *FeishuAdapter) Send(ctx context.Context, msg *bus.OutboundMessage) erro
 func (a *FeishuAdapter) Receive() <-chan *bus.InboundMessage {
 	return a.recv
 }
-
+// wsLoop 是飞书 adapter 的主循环，持续从 WebSocket 接收事件并转化为 InboundMessage 发布到 recv 通道。
 func (a *FeishuAdapter) wsLoop(ctx context.Context) {
 	for {
 		select {

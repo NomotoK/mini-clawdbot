@@ -82,7 +82,7 @@ func (m *ChannelManager) Register(channel, accountID string, adapter ChannelAdap
 	return nil
 }
 
-// Start 启动所有 adapter，并建立 inbound/outbound 转发链路。
+// Start 启动ChannelManager，启动所有 adapter，并建立 inbound/outbound 转发链路。
 func (m *ChannelManager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	if m.started {
@@ -110,14 +110,14 @@ func (m *ChannelManager) Start(ctx context.Context) error {
 		go m.forwardInbound(managedCtx, item)
 	}
 
-	outboundSub, err := m.bus.SubscribeOutbound()
+	outboundSub, err := m.bus.SubscribeOutbound()//channel manager 订阅总线的 outbound 主题，准备转发消息到 adapter
 	if err != nil {
 		cancel()
 		return fmt.Errorf("subscribe outbound bus topic: %w", err)
 	}
 
 	m.wg.Add(1)
-	go m.dispatchOutbound(managedCtx, outboundSub)
+	go m.dispatchOutbound(managedCtx, outboundSub)//启动 goroutine 转发 outbound 消息到 adapter
 
 	return nil
 }

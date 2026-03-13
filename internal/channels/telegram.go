@@ -97,7 +97,7 @@ func (a *TelegramAdapter) Send(ctx context.Context, msg *bus.OutboundMessage) er
 func (a *TelegramAdapter) Receive() <-chan *bus.InboundMessage {
 	return a.recv
 }
-
+// pollLoop 是 Telegram adapter 的主循环，持续轮询 Telegram 更新并转化为 InboundMessage 发布到 recv 通道。
 func (a *TelegramAdapter) pollLoop(ctx context.Context) {
 	for {
 		select {
@@ -130,7 +130,7 @@ func (a *TelegramAdapter) pollLoop(ctx context.Context) {
 		}
 	}
 }
-
+// convertTelegramInbound 将 TelegramUpdate 转换为 InboundMessage，提取必要字段并规范化。
 func convertTelegramInbound(accountID string, update TelegramUpdate) (*bus.InboundMessage, bool) {
 	if update.Message == nil {
 		return nil, false
