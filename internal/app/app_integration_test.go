@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"mini-clawdbot/internal/bus"
 )
 
 // fakeToolCallingModel 用于集成测试：
@@ -96,5 +98,62 @@ func TestResolveProjectRoot(t *testing.T) {
 	}
 	if root != d {
 		t.Fatalf("unexpected root: %s", root)
+	}
+}
+
+func TestServeBusInboundOutbound(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello from serve"), 0o644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+
+	a, err := NewWithDependencies(context.Background(), &fakeToolCallingModel{}, 6, root)
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- a.Serve(ctx)
+	}()
+
+	outSub, err := a.Bus().SubscribeOutbound()
+	if err != nil {
+		t.Fatalf("subscribe outbound: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	inbound := &bus.InboundMessage{
+		EventID:   "in-serve-1",
+		TraceID:   "trace-serve-1",
+		Channel:   "telegram",
+		AccountID: "acc-serve",
+		ChatID:    "chat-serve",
+		Content:   "please read readme",
+	}
+	if err := a.Bus().PublishInbound(context.Background(), inbound); err != nil {
+		t.Fatalf("publish inbound: %v", err)
+	}
+
+	select {
+	case out := <-outSub.Channel:
+		if out == nil || !strings.Contains(out.Content, "hello from serve") {
+			t.Fatalf("unexpected outbound: %+v", out)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting outbound")
+	}
+
+	cancel()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("serve returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting serve stop")
 	}
 }

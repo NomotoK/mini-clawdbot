@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -26,6 +27,22 @@ type ReactRunner struct {
 	agent *react.Agent
 	// maxStep 保存配置值，用于错误提示时回显。
 	maxStep int
+}
+
+// TraceEvent 表示一次 LLM/工具链路事件。
+type TraceEvent struct {
+	Kind      string
+	Role      schema.RoleType
+	Content   string
+	ToolName  string
+	ToolCall  string
+	Arguments string
+	Timestamp time.Time
+}
+
+// RunTrace 记录一次 ReAct 执行的事件轨迹。
+type RunTrace struct {
+	Events []TraceEvent
 }
 
 // NewReactRunner 使用工具调用模型与工具列表构建 ReAct 运行器。
@@ -132,18 +149,82 @@ func wrapInvokableToolErrors(next compose.InvokableToolEndpoint) compose.Invokab
 // - *schema.Message: ReAct 最终输出消息（通常为 assistant）
 // - error: 执行失败时返回；若超出最大步数，会返回带 maxStep 的明确错误
 func (r *ReactRunner) Run(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+	msg, _, err := r.RunWithTrace(ctx, messages)
+	return msg, err
+}
+
+// RunWithTrace 执行 ReAct 并返回最终消息与执行轨迹。
+//
+// trace 采集逻辑基于 Eino 的 react.WithMessageFuture：
+// - assistant/tool 生成消息会进入迭代器
+// - tool call / tool result / llm 文本输出会映射为事件
+func (r *ReactRunner) RunWithTrace(ctx context.Context, messages []*schema.Message) (*schema.Message, *RunTrace, error) {
 	if len(messages) == 0 {
-		return nil, errors.New("at least one message is required")
+		return nil, nil, errors.New("at least one message is required")
 	}
 
-	msg, err := r.agent.Generate(ctx, messages)
+	opt, future := react.WithMessageFuture()
+	msg, err := r.agent.Generate(ctx, messages, opt)
 	if err != nil {
 		// 对 MaxStep 错误做业务友好化包装，便于 CLI 直出。
 		if errors.Is(err, compose.ErrExceedMaxSteps) {
-			return nil, fmt.Errorf("agent reached max step limit (%d): %w", r.maxStep, err)
+			return nil, nil, fmt.Errorf("agent reached max step limit (%d): %w", r.maxStep, err)
 		}
-		return nil, fmt.Errorf("react run failed: %w", err)
+		return nil, nil, fmt.Errorf("react run failed: %w", err)
 	}
 
-	return msg, nil
+	trace := &RunTrace{Events: collectTraceEvents(future)}
+	return msg, trace, nil
+}
+
+// collectTraceEvents 从消息未来对象中收集跟踪事件。
+//
+// 事件类型包括：
+// - tool_call: 代表工具调用请求，包含工具名和参数
+// - tool_result: 代表工具调用结果，包含输出内容
+// - llm_output: 代表 LLM 生成的文本输出
+func collectTraceEvents(future react.MessageFuture) []TraceEvent {
+	iter := future.GetMessages()
+	events := make([]TraceEvent, 0, 8)
+	for {
+		msg, ok, err := iter.Next()
+		if err != nil || !ok {
+			break
+		}
+		if msg == nil {
+			continue
+		}
+		now := time.Now()
+		if len(msg.ToolCalls) > 0 {
+			for _, call := range msg.ToolCalls {
+				events = append(events, TraceEvent{
+					Kind:      "tool_call",
+					Role:      msg.Role,
+					ToolName:  call.Function.Name,
+					ToolCall:  call.ID,
+					Arguments: call.Function.Arguments,
+					Timestamp: now,
+				})
+			}
+			continue
+		}
+		if msg.Role == schema.Tool {
+			events = append(events, TraceEvent{
+				Kind:      "tool_result",
+				Role:      msg.Role,
+				Content:   msg.Content,
+				ToolName:  msg.ToolName,
+				ToolCall:  msg.ToolCallID,
+				Timestamp: now,
+			})
+			continue
+		}
+		events = append(events, TraceEvent{
+			Kind:      "llm_output",
+			Role:      msg.Role,
+			Content:   msg.Content,
+			Timestamp: now,
+		})
+	}
+	return events
 }

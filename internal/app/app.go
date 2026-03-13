@@ -2,16 +2,21 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"mini-clawdbot/internal/agent"
+	"mini-clawdbot/internal/bus"
+	"mini-clawdbot/internal/channels"
 	"mini-clawdbot/internal/config"
 	"mini-clawdbot/internal/llm"
+	"mini-clawdbot/internal/router"
 	"mini-clawdbot/internal/session"
 	"mini-clawdbot/internal/tools"
 )
@@ -29,8 +34,12 @@ type Options struct {
 // - runner: ReAct 执行器
 // - session: 内存消息会话（当前仅单轮，仍保留扩展位）
 type App struct {
-	runner  *agent.ReactRunner
-	session *session.MemorySession
+	runner       *agent.ReactRunner
+	session      *session.MemorySession
+	bus          *bus.MessageBus
+	channelMgr   *channels.ChannelManager
+	agentMgr     *agent.AgentManager
+	sessionStore session.Store
 }
 
 // New 通过“.env + 环境变量”初始化完整应用依赖。
@@ -102,9 +111,25 @@ func NewWithDependencies(ctx context.Context, chatModel model.ToolCallingChatMod
 		return nil, err
 	}
 
+	messageBus := bus.NewMessageBus(bus.Config{})
+	store := session.NewMemoryStore()
+	sessionRouter := router.NewSessionRouter()
+	channelMgr := channels.NewChannelManager(messageBus)
+	agentMgr := agent.NewAgentManager(
+		messageBus,
+		sessionRouter,
+		runner,
+		store,
+		agent.ManagerConfig{},
+	)
+
 	return &App{
-		runner:  runner,
-		session: session.NewMemorySession(),
+		runner:       runner,
+		session:      session.NewMemorySession(),
+		bus:          messageBus,
+		channelMgr:   channelMgr,
+		agentMgr:     agentMgr,
+		sessionStore: store,
 	}, nil
 }
 
@@ -144,6 +169,42 @@ func (a *App) RunOnce(ctx context.Context, userInput string) (string, error) {
 
 	// 非文本或空文本场景的保底输出，避免 CLI 无输出。
 	return fmt.Sprintf("role=%s content=%q", finalMsg.Role, finalMsg.Content), nil
+}
+
+// Serve 启动常驻服务链路（ChannelManager + AgentManager）。
+func (a *App) Serve(ctx context.Context) error {
+	if a.channelMgr == nil || a.agentMgr == nil || a.bus == nil || a.sessionStore == nil {
+		return errors.New("app serve dependencies are not ready")
+	}
+
+	if err := a.agentMgr.Start(ctx); err != nil {
+		return fmt.Errorf("start agent manager: %w", err)
+	}
+	if err := a.channelMgr.Start(ctx); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = a.agentMgr.Stop(stopCtx)
+		return fmt.Errorf("start channel manager: %w", err)
+	}
+
+	<-ctx.Done()
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = a.channelMgr.Stop(stopCtx)
+	_ = a.agentMgr.Stop(stopCtx)
+	_ = a.bus.Close()
+	return nil
+}
+
+// Bus 返回应用总线实例，用于外部注入或测试。
+func (a *App) Bus() *bus.MessageBus {
+	return a.bus
+}
+
+// ChannelManager 返回渠道管理器，用于注册 adapter。
+func (a *App) ChannelManager() *channels.ChannelManager {
+	return a.channelMgr
 }
 
 // ResolveProjectRoot 从起始目录向上查找最近的 go.mod 所在目录。
