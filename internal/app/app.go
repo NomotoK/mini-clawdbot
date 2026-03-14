@@ -210,6 +210,26 @@ func (a *App) ChannelManager() *channels.ChannelManager {
 	return a.channelMgr
 }
 
+// RegisterChannel 注册任意渠道适配器。
+func (a *App) RegisterChannel(channel, accountID string, adapter channels.ChannelAdapter) error {
+	if a.channelMgr == nil {
+		return errors.New("channel manager is not ready")
+	}
+	return a.channelMgr.Register(channel, accountID, adapter)
+}
+
+// RegisterTelegramChannel 以顶层封装方式注册 Telegram 渠道。
+func (a *App) RegisterTelegramChannel(accountID string, poller channels.TelegramPoller, sender channels.TelegramSender) error {
+	adapter := channels.NewTelegramAdapter(accountID, poller, sender)
+	return a.RegisterChannel(adapter.Name(), accountID, adapter)
+}
+
+// RegisterFeishuChannel 以顶层封装方式注册飞书渠道。
+func (a *App) RegisterFeishuChannel(accountID string, wsClient channels.FeishuWSClient, sender channels.FeishuSender) error {
+	adapter := channels.NewFeishuAdapter(accountID, wsClient, sender)
+	return a.RegisterChannel(adapter.Name(), accountID, adapter)
+}
+
 // ResolveProjectRoot 从起始目录向上查找最近的 go.mod 所在目录。
 //
 // 参数：
