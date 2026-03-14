@@ -9,12 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 	"mini-clawdbot/internal/bus"
 	"mini-clawdbot/internal/router"
 	"mini-clawdbot/internal/session"
 	"mini-clawdbot/internal/tools"
+
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 )
 
 type echoModel struct{}
@@ -92,6 +93,9 @@ func TestAgentManager_ProcessInboundToOutbound(t *testing.T) {
 		ChatID:    "chat-1",
 		ThreadID:  "thread-7",
 		Content:   "ping",
+		Metadata: map[string]any{
+			"message_id": "om_1",
+		},
 	}
 	if err := messageBus.PublishInbound(context.Background(), inbound); err != nil {
 		t.Fatalf("publish inbound: %v", err)
@@ -101,11 +105,23 @@ func TestAgentManager_ProcessInboundToOutbound(t *testing.T) {
 	if out.Channel != inbound.Channel || out.AccountID != inbound.AccountID || out.ChatID != inbound.ChatID || out.ThreadID != inbound.ThreadID {
 		t.Fatalf("outbound routing mismatch: %+v", out)
 	}
-	if out.ReplyTo != inbound.EventID {
+	if out.ReplyTo != "om_1" {
 		t.Fatalf("unexpected reply_to: %q", out.ReplyTo)
 	}
 	if !strings.Contains(out.Content, "echo:ping") {
 		t.Fatalf("unexpected outbound content: %q", out.Content)
+	}
+}
+
+func TestResolveReplyToMessageIDFallback(t *testing.T) {
+	inbound := &bus.InboundMessage{EventID: "evt-1"}
+	if got := resolveReplyToMessageID(inbound); got != "evt-1" {
+		t.Fatalf("expected fallback to event id, got %q", got)
+	}
+
+	inbound.Metadata = map[string]any{"message_id": "  om_123  "}
+	if got := resolveReplyToMessageID(inbound); got != "om_123" {
+		t.Fatalf("expected message_id from metadata, got %q", got)
 	}
 }
 

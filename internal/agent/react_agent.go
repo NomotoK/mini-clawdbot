@@ -45,6 +45,16 @@ type RunTrace struct {
 	Events []TraceEvent
 }
 
+const reactSystemPrompt = "You are a helpful assistant with access to shell tools.\n" +
+	"When deciding to use a tool, always follow the tool schema strictly.\n" +
+	"Rules for run_shell:\n" +
+	"- Always provide a real, immediately executable shell command as the 'command' argument.\n" +
+	"- Never use placeholder text like CREATE_SCRIPT_PLACEHOLDER or TODO.\n" +
+	"- On macOS/Linux, use 'python3' instead of 'python'.\n" +
+	"- To create files, prefer 'cat > file << 'EOF' ... EOF' or 'printf'.\n" +
+	"- If environment context is uncertain, call list_dir/read_file first before writing commands.\n" +
+	"Before every tool call, verify arguments are concrete, valid, and executable."
+
 // NewReactRunner 使用工具调用模型与工具列表构建 ReAct 运行器。
 //
 // 参数：
@@ -72,6 +82,7 @@ func NewReactRunner(ctx context.Context, chatModel model.ToolCallingChatModel, t
 	// ReAct Agent 由 ToolCallingModel + ToolsNode + MaxStep 组成。
 	ragent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: chatModel,
+		MessageModifier:  buildSystemPromptModifier(reactSystemPrompt),
 		ToolsConfig: compose.ToolsNodeConfig{
 			Tools:                tools,
 			UnknownToolsHandler:  buildUnknownToolsHandler(toolNames),
@@ -90,6 +101,29 @@ func NewReactRunner(ctx context.Context, chatModel model.ToolCallingChatModel, t
 	}
 
 	return &ReactRunner{agent: ragent, maxStep: maxStep}, nil
+}
+
+func buildSystemPromptModifier(systemPrompt string) react.MessageModifier {
+	return func(_ context.Context, input []*schema.Message) []*schema.Message {
+		trimmed := strings.TrimSpace(systemPrompt)
+		if trimmed == "" {
+			return input
+		}
+
+		for _, msg := range input {
+			if msg == nil || msg.Role != schema.System {
+				continue
+			}
+			if strings.TrimSpace(msg.Content) == trimmed {
+				return input
+			}
+		}
+
+		out := make([]*schema.Message, 0, len(input)+1)
+		out = append(out, schema.SystemMessage(trimmed))
+		out = append(out, input...)
+		return out
+	}
 }
 
 func collectToolNames(ctx context.Context, tools []einotool.BaseTool) ([]string, error) {

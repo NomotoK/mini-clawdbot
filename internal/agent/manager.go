@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudwego/eino/schema"
 	"mini-clawdbot/internal/bus"
 	"mini-clawdbot/internal/router"
 	"mini-clawdbot/internal/session"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -290,13 +291,30 @@ func (m *AgentManager) handleInbound(ctx context.Context, key bus.SessionKey, in
 		AccountID: inbound.AccountID,
 		ChatID:    inbound.ChatID,
 		ThreadID:  inbound.ThreadID,
-		ReplyTo:   inbound.EventID,
+		ReplyTo:   resolveReplyToMessageID(inbound),
 		Content:   content,
 		Metadata:  metadata,
 	})
 	_ = m.store.RecordEvent(ctx, key, session.EventOutboundSent, map[string]any{
 		"content": content,
 	})
+}
+
+func resolveReplyToMessageID(inbound *bus.InboundMessage) string {
+	if inbound == nil {
+		return ""
+	}
+	if inbound.Metadata != nil {
+		if v, ok := inbound.Metadata["message_id"]; ok {
+			if s, ok := v.(string); ok {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					return s
+				}
+			}
+		}
+	}
+	return inbound.EventID
 }
 
 func (m *AgentManager) workerCount() int {

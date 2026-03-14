@@ -40,6 +40,7 @@ type App struct {
 	channelMgr   *channels.ChannelManager
 	agentMgr     *agent.AgentManager
 	sessionStore session.Store
+	cfg          config.Config
 }
 
 // New 通过“.env + 环境变量”初始化完整应用依赖。
@@ -80,7 +81,12 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		return nil, err
 	}
 
-	return NewWithDependencies(ctx, chatModel, opts.MaxStep, wd)
+	a, err := NewWithDependencies(ctx, chatModel, opts.MaxStep, wd)
+	if err != nil {
+		return nil, err
+	}
+	a.cfg = cfg
+	return a, nil
 }
 
 // NewWithDependencies 使用外部注入依赖创建 App。
@@ -134,6 +140,37 @@ func NewWithDependencies(ctx context.Context, chatModel model.ToolCallingChatMod
 		agentMgr:     agentMgr,
 		sessionStore: store,
 	}, nil
+}
+
+// RegisterConfiguredChannels 根据当前配置注册内置渠道适配器。
+//
+// 返回：
+// - int: 成功注册的渠道数量
+// - error: 构建或注册任一渠道失败时返回错误
+func (a *App) RegisterConfiguredChannels() (int, error) {
+	registered := 0
+	if a.cfg.Feishu.Enabled {
+		wsClient, err := channels.NewFeishuLiveWSClient(channels.FeishuLiveConfig{
+			AppID:             a.cfg.Feishu.AppID,
+			AppSecret:         a.cfg.Feishu.AppSecret,
+			VerificationToken: a.cfg.Feishu.VerificationToken,
+			EncryptKey:        a.cfg.Feishu.EncryptKey,
+		})
+		if err != nil {
+			return registered, fmt.Errorf("build feishu ws client: %w", err)
+		}
+
+		sender, err := channels.NewFeishuLiveSender(a.cfg.Feishu.AppID, a.cfg.Feishu.AppSecret)
+		if err != nil {
+			return registered, fmt.Errorf("build feishu sender: %w", err)
+		}
+
+		if err := a.RegisterFeishuChannel(a.cfg.Feishu.AccountID, wsClient, sender); err != nil {
+			return registered, fmt.Errorf("register feishu channel: %w", err)
+		}
+		registered++
+	}
+	return registered, nil
 }
 
 // RunOnce 执行一次用户请求并返回最终文本。

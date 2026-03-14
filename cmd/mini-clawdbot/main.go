@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"mini-clawdbot/internal/app"
 )
@@ -31,6 +33,7 @@ func main() {
 		message string
 		maxStep int
 		model   string
+		serve   bool
 	)
 
 	// 注册命令行参数。
@@ -38,10 +41,11 @@ func main() {
 	flag.StringVar(&message, "m", "", "User message to run one ReAct turn (shorthand)")
 	flag.IntVar(&maxStep, "max-step", 6, "Maximum ReAct steps")
 	flag.StringVar(&model, "model", "", "Override MINI_CLAW_MODEL")
+	flag.BoolVar(&serve, "serve", false, "Run in long-running serve mode")
 	flag.Parse()
 
-	// message 是必须参数；为空时输出帮助并终止。
-	if strings.TrimSpace(message) == "" {
+	// 非 serve 模式下 message 是必须参数；为空时输出帮助并终止。
+	if !serve && strings.TrimSpace(message) == "" {
 		fmt.Fprintln(os.Stderr, "missing required -m/--message")
 		flag.Usage()
 		os.Exit(2)
@@ -55,6 +59,29 @@ func main() {
 	if err != nil {
 		reportError(err)
 		os.Exit(1)
+	}
+
+	if serve {
+		registered, err := application.RegisterConfiguredChannels()
+		if err != nil {
+			reportError(err)
+			os.Exit(1)
+		}
+		if registered == 0 {
+			reportError(fmt.Errorf("no channel configured for serve mode"))
+			fmt.Fprintln(os.Stderr, "hint: set MINI_CLAW_FEISHU_ENABLED=true and Feishu credentials in .env")
+			os.Exit(1)
+		}
+
+		serveCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		fmt.Fprintf(os.Stderr, "serve started with %d channel(s), press Ctrl+C to stop\n", registered)
+
+		if err := application.Serve(serveCtx); err != nil && !errors.Is(err, context.Canceled) {
+			reportError(err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// 执行单轮请求。
@@ -86,5 +113,8 @@ func reportError(err error) {
 	// 针对最常见配置错误提供可执行建议。
 	if strings.Contains(err.Error(), "MINI_CLAW_API_KEY") {
 		fmt.Fprintln(os.Stderr, "hint: export MINI_CLAW_API_KEY first")
+	}
+	if strings.Contains(err.Error(), "MINI_CLAW_FEISHU_") {
+		fmt.Fprintln(os.Stderr, "hint: check MINI_CLAW_FEISHU_* settings in .env")
 	}
 }

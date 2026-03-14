@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,6 +29,23 @@ type Config struct {
 	BaseURL string
 	Model   string
 	Timeout time.Duration
+	Feishu  FeishuConfig
+}
+
+// FeishuConfig 描述飞书渠道所需的最小配置。
+//
+// 字段说明：
+// - Enabled: 是否启用飞书渠道注册
+// - AppID/AppSecret: 飞书应用凭证（Enabled=true 时必填）
+// - AccountID: 渠道账号标识，用于区分同渠道多账号（默认 "default"）
+// - VerificationToken/EncryptKey: 事件校验参数（可选，按飞书应用配置填写）
+type FeishuConfig struct {
+	Enabled           bool
+	AppID             string
+	AppSecret         string
+	AccountID         string
+	VerificationToken string
+	EncryptKey        string
 }
 
 // LoadFromEnv 从环境变量读取配置并执行最小校验。
@@ -47,6 +65,13 @@ func LoadFromEnv() (Config, error) {
 		APIKey:  os.Getenv("MINI_CLAW_API_KEY"),
 		BaseURL: os.Getenv("MINI_CLAW_BASE_URL"),
 		Model:   os.Getenv("MINI_CLAW_MODEL"),
+		Feishu: FeishuConfig{
+			AppID:             os.Getenv("MINI_CLAW_FEISHU_APP_ID"),
+			AppSecret:         os.Getenv("MINI_CLAW_FEISHU_APP_SECRET"),
+			AccountID:         os.Getenv("MINI_CLAW_FEISHU_ACCOUNT_ID"),
+			VerificationToken: os.Getenv("MINI_CLAW_FEISHU_VERIFICATION_TOKEN"),
+			EncryptKey:        os.Getenv("MINI_CLAW_FEISHU_ENCRYPT_KEY"),
+		},
 	}
 
 	// API Key 是必需字段，不允许空值。
@@ -70,6 +95,24 @@ func LoadFromEnv() (Config, error) {
 	}
 
 	cfg.Timeout = time.Duration(timeoutSec) * time.Second
+	enabled, err := parseBoolEnv(os.Getenv("MINI_CLAW_FEISHU_ENABLED"))
+	if err != nil {
+		return Config{}, fmt.Errorf("MINI_CLAW_FEISHU_ENABLED: %w", err)
+	}
+	cfg.Feishu.Enabled = enabled
+
+	if cfg.Feishu.AccountID == "" {
+		cfg.Feishu.AccountID = "default"
+	}
+	if cfg.Feishu.Enabled {
+		if strings.TrimSpace(cfg.Feishu.AppID) == "" {
+			return Config{}, fmt.Errorf("MINI_CLAW_FEISHU_APP_ID is required when MINI_CLAW_FEISHU_ENABLED=true")
+		}
+		if strings.TrimSpace(cfg.Feishu.AppSecret) == "" {
+			return Config{}, fmt.Errorf("MINI_CLAW_FEISHU_APP_SECRET is required when MINI_CLAW_FEISHU_ENABLED=true")
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -87,4 +130,17 @@ func WithModelOverride(cfg Config, model string) Config {
 	}
 	cfg.Model = model
 	return cfg
+}
+
+// parseBoolEnv 解析布尔环境变量，支持 1/0、true/false、yes/no、on/off（大小写不敏感）。
+func parseBoolEnv(raw string) (bool, error) {
+	v := strings.TrimSpace(strings.ToLower(raw))
+	switch v {
+	case "", "0", "false", "no", "off":
+		return false, nil
+	case "1", "true", "yes", "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value %q", raw)
+	}
 }
