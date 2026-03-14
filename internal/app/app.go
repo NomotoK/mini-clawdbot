@@ -112,7 +112,10 @@ func NewWithDependencies(ctx context.Context, chatModel model.ToolCallingChatMod
 	}
 
 	messageBus := bus.NewMessageBus(bus.Config{})
-	store := session.NewMemoryStore()
+	store, err := session.NewJSONLStore(session.JSONLStoreConfig{RootDir: workingDir})
+	if err != nil {
+		return nil, fmt.Errorf("init session jsonl store: %w", err)
+	}
 	sessionRouter := router.NewSessionRouter()
 	channelMgr := channels.NewChannelManager(messageBus)
 	agentMgr := agent.NewAgentManager(

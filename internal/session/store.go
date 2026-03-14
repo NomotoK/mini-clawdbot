@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"sync"
 
 	"github.com/cloudwego/eino/schema"
@@ -10,7 +11,10 @@ import (
 // Store 定义按 SessionKey 访问会话历史的最小接口。(数据结构为 Message 切片)
 type Store interface {
 	Add(key bus.SessionKey, msg *schema.Message)
-	Messages(key bus.SessionKey) []*schema.Message
+	Messages(key bus.SessionKey) []*schema.Message// Messages 返回指定会话消息历史（浅拷贝）
+	ContextMessages(key bus.SessionKey, maxMessages int) []*schema.Message
+	RecordEvent(ctx context.Context, key bus.SessionKey, eventType string, payload map[string]any) error
+	Recover(ctx context.Context) error
 }
 
 // MemoryStore 是基于 MemorySession 的内存会话存储。
@@ -42,6 +46,21 @@ func (s *MemoryStore) Messages(key bus.SessionKey) []*schema.Message {
 	return s.getOrCreate(key).Messages()
 }
 
+// ContextMessages 返回裁剪后的上下文消息，确保不截断 tool call/result 对。
+func (s *MemoryStore) ContextMessages(key bus.SessionKey, maxMessages int) []*schema.Message {
+	return trimMessagesKeepToolPairs(s.Messages(key), maxMessages)
+}
+
+// RecordEvent 在内存存储中是 no-op，仅保留接口兼容。
+func (s *MemoryStore) RecordEvent(context.Context, bus.SessionKey, string, map[string]any) error {
+	return nil
+}
+
+// Recover 在内存存储中是 no-op。
+func (s *MemoryStore) Recover(context.Context) error {
+	return nil
+}
+
 func (s *MemoryStore) getOrCreate(key bus.SessionKey) *MemorySession {
 	s.mu.RLock()
 	existing, ok := s.sessions[key]
@@ -58,4 +77,96 @@ func (s *MemoryStore) getOrCreate(key bus.SessionKey) *MemorySession {
 	created := NewMemorySession()
 	s.sessions[key] = created
 	return created
+}
+
+func trimMessagesKeepToolPairs(messages []*schema.Message, maxMessages int) []*schema.Message {
+	if maxMessages <= 0 || len(messages) <= maxMessages {
+		return copyMessages(messages)
+	}
+
+	start := len(messages) - maxMessages
+	if start < 0 {
+		start = 0
+	}
+
+	for start > 0 {
+		current := messages[start]
+		if current == nil {
+			start--
+			continue
+		}
+
+		if current.Role == schema.Tool {
+			callID := current.ToolCallID
+			if callID == "" {
+				start++
+				break
+			}
+			foundAssistant := false
+			for i := start - 1; i >= 0; i-- {
+				msg := messages[i]
+				if msg == nil || msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
+					continue
+				}
+				if hasToolCallID(msg, callID) {
+					start = i
+					foundAssistant = true
+					break
+				}
+			}
+			if !foundAssistant {
+				start++
+				break
+			}
+			continue
+		}
+
+		if current.Role == schema.Assistant && len(current.ToolCalls) > 0 {
+			missingToolResult := false
+			for _, call := range current.ToolCalls {
+				if !hasToolResultInRange(messages, start+1, call.ID) {
+					missingToolResult = true
+					break
+				}
+			}
+			if missingToolResult {
+				start--
+				continue
+			}
+		}
+		break
+	}
+
+	if start < 0 {
+		start = 0
+	}
+	return copyMessages(messages[start:])
+}
+
+func hasToolCallID(msg *schema.Message, callID string) bool {
+	for _, call := range msg.ToolCalls {
+		if call.ID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolResultInRange(messages []*schema.Message, from int, callID string) bool {
+	for i := from; i < len(messages); i++ {
+		msg := messages[i]
+		if msg == nil {
+			continue
+		}
+		if msg.Role == schema.Tool && msg.ToolCallID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+func copyMessages(messages []*schema.Message) []*schema.Message {
+	out := make([]*schema.Message, len(messages))
+	copy(out, messages)
+	return out
 }
