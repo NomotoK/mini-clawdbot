@@ -13,6 +13,7 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 	"mini-clawdbot/internal/bus"
+	"mini-clawdbot/internal/toolruntime"
 )
 
 const (
@@ -28,6 +29,8 @@ const (
 	EventOutboundSent = "outbound_sent"
 	// EventError 表示错误事件。
 	EventError = "error"
+	// EventToolAudit 表示统一工具运行时审计事件。
+	EventToolAudit = "tool_audit"
 )
 
 // JSONLStoreConfig 定义 JSONLStore 配置。
@@ -118,6 +121,22 @@ func (s *JSONLStore) RecordEvent(_ context.Context, key bus.SessionKey, eventTyp
 		return fmt.Errorf("append session event: %w", err)
 	}
 	return nil
+}
+
+// RecordToolAudit 追加统一工具审计事件。
+func (s *JSONLStore) RecordToolAudit(ctx context.Context, event toolruntime.AuditEvent) error {
+	key := event.SessionKey
+	if key == "" {
+		key = bus.NewSessionKey("system", "default", "cron", "root")
+	}
+	payload := map[string]any{
+		"tool_name":    event.ToolName,
+		"trace_id":     event.TraceID,
+		"tool_call_id": event.ToolCallID,
+		"args":         event.Args,
+		"result":       event.Result,
+	}
+	return s.RecordEvent(ctx, key, EventToolAudit, payload)
 }
 
 // Recover 扫描 JSONL 并回放为内存快照。
@@ -211,6 +230,77 @@ func (s *JSONLStore) sessionPath(key bus.SessionKey) string {
 	return filepath.Join(s.dir, safeSessionKey(key)+".jsonl")
 }
 
+// QueryToolAudits 查询工具审计事件。
+func (s *JSONLStore) QueryToolAudits(_ context.Context, limit int) ([]ToolAuditRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions dir: %w", err)
+	}
+
+	records := make([]ToolAuditRecord, 0, limit)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+
+		path := filepath.Join(s.dir, entry.Name())
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("open session file %s: %w", path, err)
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var record EventRecord
+			if err := json.Unmarshal([]byte(line), &record); err != nil {
+				_ = f.Close()
+				return nil, fmt.Errorf("decode audit event: %w", err)
+			}
+			if record.EventType != EventToolAudit {
+				continue
+			}
+			parsed := ToolAuditRecord{
+				SessionKey: bus.SessionKey(record.SessionKey),
+				Timestamp:  record.Timestamp,
+			}
+			if v, ok := record.Payload["tool_name"].(string); ok {
+				parsed.ToolName = v
+			}
+			if v, ok := record.Payload["trace_id"].(string); ok {
+				parsed.TraceID = v
+			}
+			if v, ok := record.Payload["tool_call_id"].(string); ok {
+				parsed.ToolCallID = v
+			}
+			if v, ok := record.Payload["args"].(map[string]any); ok {
+				parsed.Args = v
+			}
+			if rawResult, ok := record.Payload["result"]; ok {
+				data, _ := json.Marshal(rawResult)
+				_ = json.Unmarshal(data, &parsed.Result)
+			}
+			records = append(records, parsed)
+			if len(records) >= limit {
+				_ = f.Close()
+				return records, nil
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("scan session file %s: %w", path, err)
+		}
+		_ = f.Close()
+	}
+	return records, nil
+}
+// safeSessionKey 替换文件系统不安全字符，确保 session key 可用于文件名。
 func safeSessionKey(key bus.SessionKey) string {
 	raw := string(key)
 	return strings.Map(func(r rune) rune {

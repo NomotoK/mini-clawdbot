@@ -3,9 +3,11 @@ package session
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 	"mini-clawdbot/internal/bus"
+	"mini-clawdbot/internal/toolruntime"
 )
 
 // Store 定义按 SessionKey 访问会话历史的最小接口。(数据结构为 Message 切片)
@@ -15,6 +17,22 @@ type Store interface {
 	ContextMessages(key bus.SessionKey, maxMessages int) []*schema.Message
 	RecordEvent(ctx context.Context, key bus.SessionKey, eventType string, payload map[string]any) error
 	Recover(ctx context.Context) error
+}
+
+// ToolAuditRecord 是工具审计结构化记录。
+type ToolAuditRecord struct {
+	SessionKey bus.SessionKey                `json:"session_key"`
+	Timestamp  time.Time                     `json:"timestamp"`
+	ToolName   string                        `json:"tool_name"`
+	TraceID    string                        `json:"trace_id"`
+	ToolCallID string                        `json:"tool_call_id"`
+	Args       map[string]any                `json:"args,omitempty"`
+	Result     toolruntime.ExecutionResult   `json:"result"`
+}
+
+// AuditQueryable 支持查询工具审计日志。
+type AuditQueryable interface {
+	QueryToolAudits(ctx context.Context, limit int) ([]ToolAuditRecord, error)
 }
 
 // MemoryStore 是基于 MemorySession 的内存会话存储。
@@ -59,6 +77,26 @@ func (s *MemoryStore) RecordEvent(context.Context, bus.SessionKey, string, map[s
 // Recover 在内存存储中是 no-op。
 func (s *MemoryStore) Recover(context.Context) error {
 	return nil
+}
+
+// RecordToolAudit 在内存存储中回放为通用事件。
+func (s *MemoryStore) RecordToolAudit(ctx context.Context, event toolruntime.AuditEvent) error {
+	key := event.SessionKey
+	if key == "" {
+		key = bus.NewSessionKey("system", "default", "cron", "root")
+	}
+	return s.RecordEvent(ctx, key, EventToolAudit, map[string]any{
+		"tool_name":    event.ToolName,
+		"trace_id":     event.TraceID,
+		"tool_call_id": event.ToolCallID,
+		"args":         event.Args,
+		"result":       event.Result,
+	})
+}
+
+// QueryToolAudits 在内存存储中无持久记录，返回空结果。
+func (s *MemoryStore) QueryToolAudits(context.Context, int) ([]ToolAuditRecord, error) {
+	return []ToolAuditRecord{}, nil
 }
 
 func (s *MemoryStore) getOrCreate(key bus.SessionKey) *MemorySession {
