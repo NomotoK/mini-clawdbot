@@ -139,7 +139,7 @@ func (s *feishuLiveSender) Send(ctx context.Context, req FeishuSendRequest) erro
 
 	if strings.TrimSpace(req.ReplyTo) != "" {
 		replyBody := larkim.NewReplyMessageReqBodyBuilder().
-			MsgType("text").
+			MsgType("text"). //  设定信息类型为文本
 			Content(string(textContent)).
 			ReplyInThread(strings.TrimSpace(req.ThreadID) != "").
 			Uuid(buildFeishuMessageUUID()).
