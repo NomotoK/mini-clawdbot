@@ -158,3 +158,13 @@ type ErrorEvent struct {
 	Cause      string
 	Timestamp  time.Time
 }
+
+// AuditEvent 表示系统审计事件（如 tool_audit / cron_run）。
+type AuditEvent struct {
+	EventID    string
+	TraceID    string
+	SessionKey SessionKey
+	Kind       string
+	Payload    map[string]any
+	Timestamp  time.Time
+}

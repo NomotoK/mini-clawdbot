@@ -18,7 +18,7 @@ func TestNewSessionKey_DefaultThreadFallback(t *testing.T) {
 	}
 }
 
-// TestMessageBus_PublishAndSubscribe_AllTopics 测试 MessageBus 在四个话题上的发布和订阅功能。
+// TestMessageBus_PublishAndSubscribe_AllTopics 测试 MessageBus 在全部话题上的发布和订阅功能。
 // 验证：
 //   - 所有事件类型（InboundMessage、OutboundMessage、StreamEvent、ErrorEvent）都能正确发布和接收
 //   - 事件的默认字段（EventID、TraceID、Timestamp）在发布时被正确填充
@@ -43,6 +43,10 @@ func TestMessageBus_PublishAndSubscribe_AllTopics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("subscribe error: %v", err)
 	}
+	auditSub, err := b.SubscribeAudit()
+	if err != nil {
+		t.Fatalf("subscribe audit: %v", err)
+	}
 
 	in := &InboundMessage{Channel: "telegram", AccountID: "acc-1", ChatID: "chat-1", Content: "hello"}
 	if err := b.PublishInbound(context.Background(), in); err != nil {
@@ -62,6 +66,10 @@ func TestMessageBus_PublishAndSubscribe_AllTopics(t *testing.T) {
 	ee := &ErrorEvent{SessionKey: NewSessionKey("telegram", "acc-1", "chat-1", ""), Stage: "tool", Message: "boom"}
 	if err := b.PublishError(context.Background(), ee); err != nil {
 		t.Fatalf("publish error: %v", err)
+	}
+	ae := &AuditEvent{SessionKey: NewSessionKey("telegram", "acc-1", "chat-1", ""), Kind: "tool_audit"}
+	if err := b.PublishAudit(context.Background(), ae); err != nil {
+		t.Fatalf("publish audit: %v", err)
 	}
 
 	recvInbound := mustRecv(t, inSub.Channel)
@@ -85,6 +93,11 @@ func TestMessageBus_PublishAndSubscribe_AllTopics(t *testing.T) {
 	recvError := mustRecv(t, errSub.Channel)
 	if recvError.Message != "boom" || recvError.Stage != "tool" {
 		t.Fatalf("unexpected error event: %+v", recvError)
+	}
+
+	recvAudit := mustRecv(t, auditSub.Channel)
+	if recvAudit.Kind != "tool_audit" {
+		t.Fatalf("unexpected audit event: %+v", recvAudit)
 	}
 }
 

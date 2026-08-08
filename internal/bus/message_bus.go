@@ -11,6 +11,7 @@ type MessageBus struct {
 	inbound  *blockingTopic[*InboundMessage]
 	outbound *blockingTopic[*OutboundMessage]
 	errTopic *blockingTopic[*ErrorEvent]
+	audit    *blockingTopic[*AuditEvent]
 	stream   *streamTopic
 
 	mu     sync.RWMutex
@@ -27,6 +28,7 @@ func NewMessageBus(cfg Config) *MessageBus {
 	b.inbound = newBlockingTopic[*InboundMessage](normalized.InboundBuffer, normalized.SubscriberBuffer)
 	b.outbound = newBlockingTopic[*OutboundMessage](normalized.OutboundBuffer, normalized.SubscriberBuffer)
 	b.errTopic = newBlockingTopic[*ErrorEvent](normalized.ErrorBuffer, normalized.SubscriberBuffer)
+	b.audit = newBlockingTopic[*AuditEvent](normalized.AuditBuffer, normalized.SubscriberBuffer)
 	b.stream = newStreamTopic(normalized.StreamBuffer, normalized.SubscriberBuffer)
 	return b
 }
@@ -56,6 +58,15 @@ func (b *MessageBus) PublishError(ctx context.Context, evt *ErrorEvent) error {
 	}
 	ensureErrorDefaults(evt)
 	return b.errTopic.publish(ctx, evt, b.done)
+}
+
+// PublishAudit 发布审计事件。
+func (b *MessageBus) PublishAudit(ctx context.Context, evt *AuditEvent) error {
+	if err := b.ensureOpen(); err != nil {
+		return err
+	}
+	ensureAuditDefaults(evt)
+	return b.audit.publish(ctx, evt, b.done)
 }
 
 // PublishStream 发布流式分片事件。队列满时会丢弃旧分片保留最新分片。
@@ -91,6 +102,14 @@ func (b *MessageBus) SubscribeError() (*Subscription[*ErrorEvent], error) {
 	return b.errTopic.subscribe(), nil
 }
 
+// SubscribeAudit 订阅审计事件。
+func (b *MessageBus) SubscribeAudit() (*Subscription[*AuditEvent], error) {
+	if err := b.ensureOpen(); err != nil {
+		return nil, err
+	}
+	return b.audit.subscribe(), nil
+}
+
 // SubscribeStream 订阅流式分片事件。
 func (b *MessageBus) SubscribeStream() (*Subscription[*StreamEvent], error) {
 	if err := b.ensureOpen(); err != nil {
@@ -113,6 +132,7 @@ func (b *MessageBus) Close() error {
 	b.inbound.close()
 	b.outbound.close()
 	b.errTopic.close()
+	b.audit.close()
 	b.stream.close()
 	return nil
 }
@@ -184,6 +204,22 @@ func ensureStreamDefaults(evt *StreamEvent) {
 
 // ensureErrorDefaults 填充 ErrorEvent 的默认字段。
 func ensureErrorDefaults(evt *ErrorEvent) {
+	if evt == nil {
+		return
+	}
+	if evt.EventID == "" {
+		evt.EventID = nextEventID()
+	}
+	if evt.TraceID == "" {
+		evt.TraceID = evt.EventID
+	}
+	if evt.Timestamp.IsZero() {
+		evt.Timestamp = time.Now()
+	}
+}
+
+// ensureAuditDefaults 填充 AuditEvent 默认字段。
+func ensureAuditDefaults(evt *AuditEvent) {
 	if evt == nil {
 		return
 	}

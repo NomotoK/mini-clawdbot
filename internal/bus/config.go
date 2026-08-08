@@ -6,6 +6,7 @@ type Config struct {
 	OutboundBuffer   int
 	StreamBuffer     int
 	ErrorBuffer      int
+	AuditBuffer      int
 	SubscriberBuffer int
 }
 
@@ -22,6 +23,9 @@ func (c Config) normalize() Config {
 	}
 	if cfg.ErrorBuffer <= 0 {
 		cfg.ErrorBuffer = defaultTopicBuffer
+	}
+	if cfg.AuditBuffer <= 0 {
+		cfg.AuditBuffer = defaultTopicBuffer
 	}
 	if cfg.SubscriberBuffer <= 0 {
 		cfg.SubscriberBuffer = defaultSubscriberBuffer
