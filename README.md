@@ -6,7 +6,10 @@
 
 - 单轮 CLI 入口（一次输入 -> ReAct 工具调用 -> 一次输出）
 - OpenAI 兼容模型接入（通过 Eino OpenAI 扩展）
-- 内置工具：`read_file`、`list_dir`、`run_shell`
+- 内置工具：`read_file`、`list_dir`、`run_shell`、`web_fetch`、`browser_action`
+- 统一工具运行时（参数校验、权限策略、timeout、输出截断、审计）
+- 服务监督器（Bus / Session / ToolRuntime / AgentManager / ChannelManager / Cron / Gateway）
+- Gateway 控制面：`/health`、`/services`、`/sessions/{key}`、`/tools/audit`、`/cron/jobs/{id}/run`
 
 ## 环境变量
 
@@ -14,6 +17,11 @@
 - `MINI_CLAW_BASE_URL`（可选，OpenAI 兼容网关地址）
 - `MINI_CLAW_MODEL`（可选，默认 `gpt-4o-mini`）
 - `MINI_CLAW_TIMEOUT_SEC`（可选，默认 `60`）
+- `MINI_CLAW_GATEWAY_ENABLED`（可选，默认 `true`）
+- `MINI_CLAW_GATEWAY_HOST`（可选，默认 `127.0.0.1`）
+- `MINI_CLAW_GATEWAY_PORT`（可选，默认 `18080`）
+- `MINI_CLAW_GATEWAY_AUTH_TOKEN`（可选，设置后 Gateway 要求鉴权）
+- `MINI_CLAW_TOOLS_DOCKER_ENABLED`（可选，默认 `false`，启用 `run_shell` Docker 模式）
 - `MINI_CLAW_FEISHU_ENABLED`（可选，`true/false`，默认 `false`，用于选择是否启用飞书渠道）
 - `MINI_CLAW_FEISHU_APP_ID`（`MINI_CLAW_FEISHU_ENABLED=true` 时必填）
 - `MINI_CLAW_FEISHU_APP_SECRET`（`MINI_CLAW_FEISHU_ENABLED=true` 时必填）
@@ -32,6 +40,11 @@ MINI_CLAW_API_KEY=your_api_key
 MINI_CLAW_BASE_URL=https://api.openai.com/v1
 MINI_CLAW_MODEL=gpt-4o-mini
 MINI_CLAW_TIMEOUT_SEC=60
+MINI_CLAW_GATEWAY_ENABLED=true
+MINI_CLAW_GATEWAY_HOST=127.0.0.1
+MINI_CLAW_GATEWAY_PORT=18080
+MINI_CLAW_GATEWAY_AUTH_TOKEN=
+MINI_CLAW_TOOLS_DOCKER_ENABLED=false
 MINI_CLAW_FEISHU_ENABLED=false
 MINI_CLAW_FEISHU_APP_ID=
 MINI_CLAW_FEISHU_APP_SECRET=
@@ -72,3 +85,5 @@ MINI_CLAW_FEISHU_ACCOUNT_ID=feishu-main
 ```bash
 go run ./cmd/mini-clawdbot --serve
 ```
+
+未配置渠道时，`--serve` 会继续启动 Gateway 与 Cron（但不会收发渠道消息）。
