@@ -30,6 +30,46 @@ type Config struct {
 	Model   string
 	Timeout time.Duration
 	Feishu  FeishuConfig
+	Service ServiceConfig
+}
+
+// ServiceConfig 是 M3 分层服务配置。
+type ServiceConfig struct {
+	Channels ManagerSection  `json:"channels"`
+	Gateway  GatewaySection  `json:"gateway"`
+	Tools    ToolsSection    `json:"tools"`
+	Security SecuritySection `json:"security"`
+	Session  SessionSection  `json:"session"`
+	Cron     CronSection     `json:"cron"`
+	Manager  ManagerSection  `json:"manager"`
+}
+
+type GatewaySection struct {
+	Enabled   bool
+	Host      string
+	Port      int
+	AuthToken string
+}
+
+type ToolsSection struct {
+	EnableDocker bool
+}
+
+type SecuritySection struct {
+	DefaultTimeoutSec int
+	MaxOutputBytes    int
+}
+
+type SessionSection struct {
+	MaxContextMessages int
+}
+
+type CronSection struct {
+	Enabled bool
+}
+
+type ManagerSection struct {
+	WorkerQueueSize int
 }
 
 // FeishuConfig 描述飞书渠道所需的最小配置。
@@ -73,6 +113,7 @@ func LoadFromEnv() (Config, error) {
 			EncryptKey:        os.Getenv("MINI_CLAW_FEISHU_ENCRYPT_KEY"),
 		},
 	}
+	cfg.Service = defaultServiceConfig()
 
 	// API Key 是必需字段，不允许空值。
 	if cfg.APIKey == "" {
@@ -113,6 +154,24 @@ func LoadFromEnv() (Config, error) {
 		}
 	}
 
+	if host := strings.TrimSpace(os.Getenv("MINI_CLAW_GATEWAY_HOST")); host != "" {
+		cfg.Service.Gateway.Host = host
+	}
+	if rawPort := strings.TrimSpace(os.Getenv("MINI_CLAW_GATEWAY_PORT")); rawPort != "" {
+		v, err := strconv.Atoi(rawPort)
+		if err != nil || v <= 0 || v > 65535 {
+			return Config{}, fmt.Errorf("MINI_CLAW_GATEWAY_PORT must be within (0,65535]")
+		}
+		cfg.Service.Gateway.Port = v
+	}
+	cfg.Service.Gateway.AuthToken = strings.TrimSpace(os.Getenv("MINI_CLAW_GATEWAY_AUTH_TOKEN"))
+	if enabled, err := parseBoolEnv(os.Getenv("MINI_CLAW_GATEWAY_ENABLED")); err == nil && os.Getenv("MINI_CLAW_GATEWAY_ENABLED") != "" {
+		cfg.Service.Gateway.Enabled = enabled
+	}
+	if dockerEnabled, err := parseBoolEnv(os.Getenv("MINI_CLAW_TOOLS_DOCKER_ENABLED")); err == nil {
+		cfg.Service.Tools.EnableDocker = dockerEnabled
+	}
+
 	return cfg, nil
 }
 
@@ -142,5 +201,32 @@ func parseBoolEnv(raw string) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("invalid boolean value %q", raw)
+	}
+}
+
+func defaultServiceConfig() ServiceConfig {
+	return ServiceConfig{
+		Channels: ManagerSection{},
+		Gateway: GatewaySection{
+			Enabled: true,
+			Host: "127.0.0.1",
+			Port: 18080,
+		},
+		Tools: ToolsSection{
+			EnableDocker: false,
+		},
+		Security: SecuritySection{
+			DefaultTimeoutSec: 20,
+			MaxOutputBytes:    64 * 1024,
+		},
+		Session: SessionSection{
+			MaxContextMessages: 80,
+		},
+		Cron: CronSection{
+			Enabled: true,
+		},
+		Manager: ManagerSection{
+			WorkerQueueSize: 64,
+		},
 	}
 }
