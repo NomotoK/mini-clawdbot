@@ -68,9 +68,7 @@ func main() {
 			os.Exit(1)
 		}
 		if registered == 0 {
-			reportError(fmt.Errorf("no channel configured for serve mode"))
-			fmt.Fprintln(os.Stderr, "hint: set MINI_CLAW_FEISHU_ENABLED=true and Feishu credentials in .env")
-			os.Exit(1)
+			fmt.Fprintln(os.Stderr, "warning: no channel configured, serve mode will run gateway/cron only")
 		}
 
 		serveCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
