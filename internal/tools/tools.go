@@ -1,339 +1,113 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"mini-clawdbot/internal/toolruntime"
 )
 
-const (
-	// defaultShellTimeoutSec 是 run_shell 未指定 timeout 时使用的默认秒数。
-	defaultShellTimeoutSec = 20
-	// maxShellTimeoutSec 是 run_shell 可接受的最大超时秒数，用于避免长时间阻塞。
-	maxShellTimeoutSec = 60
-)
-
-// blockedShellKeywords 定义高危命令关键词黑名单。
-// 当前策略采用“子串匹配”，命中任一关键词即拒绝执行。
-var blockedShellKeywords = []string{"rm -rf", "mkfs", "shutdown", "reboot"}
-
-// BuildMVPTools 构建 MVP 所需的三类工具：read_file/list_dir/run_shell。
-//
-// 参数：
-// - workingDir: 工具执行根目录（相对路径将基于该目录解析）
-//
-// 返回：
-// - []einotool.BaseTool: 可交给 Eino ToolsNode 的工具列表
-// - error: 工具推断或路径解析失败时返回
-func BuildMVPTools(workingDir string) ([]einotool.BaseTool, error) {
-	// 统一为绝对路径，确保工具行为不受调用方当前目录影响。
+// BuildMVPTools 构建 Eino 可调用工具。
+func BuildMVPTools(workingDir string, runtime *toolruntime.Runtime) ([]einotool.BaseTool, *toolruntime.Runtime, error) {
 	wd, err := filepath.Abs(workingDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve working dir: %w", err)
+		return nil, nil, fmt.Errorf("resolve working dir: %w", err)
 	}
 
-	// toolSet 持有共享运行时上下文（当前仅 workingDir）。
-	ts := &toolSet{workingDir: wd}
-
-	// 采用显式标准 Tool 实现，便于自定义 ToolInfo 与执行逻辑。
-	return []einotool.BaseTool{
-		&readFileTool{set: ts},
-		&listDirTool{set: ts},
-		&runShellTool{set: ts},
-	}, nil
-}
-
-// toolSet 聚合工具实现需要共享的上下文状态。
-// 当前仅保存 workingDir，后续可扩展权限策略、审计器等。
-type toolSet struct {
-	// workingDir 是工具执行目录：
-	// - read_file/list_dir 的相对路径基于该目录解析
-	// - run_shell 的命令在该目录中执行
-	workingDir string
-}
-
-type readFileTool struct {
-	set *toolSet
-}
-
-func (t *readFileTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{
-		Name: "read_file",
-		Desc: "Read file content by path",
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"path": {
-				Type:     schema.String,
-				Desc:     "Path to the file",
-				Required: true,
-			},
-		}),
-	}, nil
-}
-
-func (t *readFileTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
-	var in readFileInput
-	if err := parseArguments(argumentsInJSON, &in); err != nil {
-		return "", fmt.Errorf("read_file invalid arguments: %w", err)
-	}
-	return t.set.readFile(ctx, in)
-}
-
-type listDirTool struct {
-	set *toolSet
-}
-
-func (t *listDirTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{
-		Name: "list_dir",
-		Desc: "List directory entries by path",
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"path": {
-				Type:     schema.String,
-				Desc:     "Path to directory",
-				Required: true,
-			},
-		}),
-	}, nil
-}
-
-func (t *listDirTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
-	var in listDirInput
-	if err := parseArguments(argumentsInJSON, &in); err != nil {
-		return "", fmt.Errorf("list_dir invalid arguments: %w", err)
-	}
-	return t.set.listDir(ctx, in)
-}
-
-type runShellTool struct {
-	set *toolSet
-}
-
-func (t *runShellTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{
-		Name: "run_shell",
-		Desc: "Run a shell command in project working directory",
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"command": {
-				Type:     schema.String,
-				Desc:     "Shell command to run",
-				Required: true,
-			},
-			"timeout_sec": {
-				Type: schema.Integer,
-				Desc: "Timeout seconds, default 20, max 60",
-			},
-		}),
-	}, nil
-}
-
-func (t *runShellTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
-	var in runShellInput
-	if err := parseArguments(argumentsInJSON, &in); err != nil {
-		return "", fmt.Errorf("run_shell invalid arguments: %w", err)
-	}
-	return t.set.runShell(ctx, in)
-}
-
-func parseArguments(argumentsInJSON string, dst any) error {
-	arguments := strings.TrimSpace(argumentsInJSON)
-	if arguments == "" {
-		return errors.New("arguments are required")
-	}
-
-	if err := json.Unmarshal([]byte(arguments), dst); err != nil {
-		return fmt.Errorf("arguments must be valid json: %w", err)
-	}
-	return nil
-}
-
-// readFileInput 是 read_file 的 JSON 入参结构。
-type readFileInput struct {
-	// Path 支持绝对/相对路径；相对路径会在 resolvePath 中转换。
-	Path string `json:"path" jsonschema_description:"Path to the file"`
-}
-
-// readFile 读取目标文件并返回原始文本内容。
-//
-// 参数：
-// - ctx: 上下文（当前逻辑未直接使用）
-// - in: 入参结构，包含 path
-//
-// 返回：
-// - string: 文件完整内容
-// - error: 参数缺失、路径无效或读取失败时返回
-func (t *toolSet) readFile(_ context.Context, in readFileInput) (string, error) {
-	if strings.TrimSpace(in.Path) == "" {
-		return "", errors.New("path is required")
-	}
-
-	absPath := t.resolvePath(in.Path)
-	content, err := os.ReadFile(absPath)
-	if err != nil {
-		return "", fmt.Errorf("read_file failed: %w", err)
-	}
-
-	return string(content), nil
-}
-
-// listDirInput 是 list_dir 的 JSON 入参结构。
-type listDirInput struct {
-	// Path 目标目录路径，不能为空。
-	Path string `json:"path" jsonschema_description:"Path to directory"`
-}
-
-// listDir 列出目录下一级条目，并用 [DIR] 标记子目录。
-//
-// 参数：
-// - ctx: 上下文（当前逻辑未直接使用）
-// - in: 入参结构，包含目录 path
-//
-// 返回：
-// - string: 按字典序拼接后的条目文本（每行一个）
-// - error: 参数缺失或目录读取失败时返回
-func (t *toolSet) listDir(_ context.Context, in listDirInput) (string, error) {
-	if strings.TrimSpace(in.Path) == "" {// 空路径没有意义，直接报错。
-		return "", errors.New("path is required")
-	}
-
-	absPath := t.resolvePath(in.Path)// 解析为绝对路径，确保工具行为一致且安全。
-	entries, err := os.ReadDir(absPath)// 读取目录条目列表，失败时返回错误。
-	if err != nil {
-		return "", fmt.Errorf("list_dir failed: %w", err)
-	}
-
-	// items 保存渲染后的条目文本；预分配减少扩容次数。
-	items := make([]string, 0, len(entries))
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() {
-			name = "[DIR] " + name
-		}
-		items = append(items, name)
-	}
-
-	// 排序保证模型多次调用时输出稳定，便于测试与 diff。
-	sort.Strings(items)
-	return strings.Join(items, "\n"), nil
-}
-
-// runShellInput 是 run_shell 的 JSON 入参结构。
-type runShellInput struct {
-	// Command 为要执行的 shell 命令字符串（必填）。
-	Command string `json:"command" jsonschema_description:"Shell command to run"`
-	// TimeoutSec 为可选超时秒数；<=0 用默认值，>max 会被截断到 max。
-	TimeoutSec int `json:"timeout_sec,omitempty" jsonschema_description:"Timeout seconds, default 20, max 60"`
-}
-
-// runShell 在固定 workingDir 中执行命令并返回输出。
-//
-// 安全策略：
-// - 命中 blockedShellKeywords 即拒绝执行
-// - 执行超时默认 20s，最大 60s
-//
-// 输出策略：
-// - 成功优先返回 stdout
-// - stdout 为空则回退 stderr
-// - 两者都为空时返回固定提示文本
-//
-// 参数：
-// - ctx: 外层上下文（用于取消或继承超时）
-// - in: 命令及超时入参
-//
-// 返回：
-// - string: 命令输出文本
-// - error: 参数错误、策略拦截、执行失败或超时时返回
-func (t *toolSet) runShell(ctx context.Context, in runShellInput) (string, error) {
-	command := strings.TrimSpace(in.Command)
-	if command == "" {
-		return "", errors.New("command is required")
-	}
-	if isBlockedCommand(command) {
-		return "", errors.New("command blocked by safety policy")
-	}
-
-	// timeoutSec 最终执行超时值，应用默认与上限策略。
-	timeoutSec := in.TimeoutSec
-	if timeoutSec <= 0 {
-		timeoutSec = defaultShellTimeoutSec
-	}
-	if timeoutSec > maxShellTimeoutSec {
-		timeoutSec = maxShellTimeoutSec
-	}
-
-	// execCtx 绑定本次命令执行超时。
-	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-
-	// 使用 sh -c 保持与常见 shell 命令习惯一致。
-	cmd := exec.CommandContext(execCtx, "sh", "-c", command)
-	cmd.Dir = t.workingDir
-
-	// stdout/stderr 分离采集，便于失败时拼接诊断信息。
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if execCtx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("run_shell timed out after %ds", timeoutSec)
-	}
-	if err != nil {
-		combined := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
-		if combined == "" {
-			return "", fmt.Errorf("run_shell failed: %w", err)
-		}
-		return "", fmt.Errorf("run_shell failed: %w\n%s", err, combined)
-	}
-
-	output := strings.TrimSpace(stdout.String())
-	if output == "" {
-		output = strings.TrimSpace(stderr.String())
-	}
-	if output == "" {
-		output = "(command completed with no output)"
-	}
-
-	return output, nil
-}
-
-// resolvePath 将用户输入路径解析为最终文件系统路径。
-//
-// 规则：
-// - 绝对路径：直接 Clean 后返回
-// - 相对路径：拼接 workingDir 后返回
-func (t *toolSet) resolvePath(path string) string {
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
-	}
-	return filepath.Join(t.workingDir, filepath.Clean(path))
-}
-
-// isBlockedCommand 检查命令是否命中高危关键词。
-//
-// 参数：
-// - command: 原始命令字符串
-//
-// 返回：
-// - true: 命中黑名单，应该拒绝执行
-// - false: 未命中黑名单，可继续执行
-func isBlockedCommand(command string) bool {
-	lowered := strings.ToLower(command)
-	for _, kw := range blockedShellKeywords {
-		if strings.Contains(lowered, kw) {
-			return true
+	rt := runtime
+	if rt == nil {
+		rt, err = toolruntime.BuildDefaultRuntime(toolruntime.DefaultRuntimeConfig{
+			WorkingDir: wd,
+		}, nil)
+		if err != nil {
+			return nil, nil, err
 		}
 	}
-	return false
+
+	tools := []einotool.BaseTool{
+		&einoToolAdapter{
+			runtime: rt,
+			name:    "read_file",
+			desc:    "Read file content by path",
+			params: map[string]*schema.ParameterInfo{
+				"path": {Type: schema.String, Desc: "Path to file", Required: true},
+			},
+		},
+		&einoToolAdapter{
+			runtime: rt,
+			name:    "list_dir",
+			desc:    "List directory entries by path",
+			params: map[string]*schema.ParameterInfo{
+				"path": {Type: schema.String, Desc: "Path to directory", Required: true},
+			},
+		},
+		&einoToolAdapter{
+			runtime: rt,
+			name:    "run_shell",
+			desc:    "Run shell command with security policy and sandbox",
+			params: map[string]*schema.ParameterInfo{
+				"command": {Type: schema.String, Desc: "Shell command", Required: true},
+			},
+		},
+		&einoToolAdapter{
+			runtime: rt,
+			name:    "web_fetch",
+			desc:    "Fetch URL by HTTP GET",
+			params: map[string]*schema.ParameterInfo{
+				"url": {Type: schema.String, Desc: "URL to fetch", Required: true},
+			},
+		},
+		&einoToolAdapter{
+			runtime: rt,
+			name:    "browser_action",
+			desc:    "Run browser action in host mode",
+			params: map[string]*schema.ParameterInfo{
+				"action": {Type: schema.String, Desc: "Browser action", Required: true},
+			},
+		},
+	}
+	return tools, rt, nil
 }
+
+type einoToolAdapter struct {
+	runtime *toolruntime.Runtime
+	name    string
+	desc    string
+	params  map[string]*schema.ParameterInfo
+}
+
+func (t *einoToolAdapter) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name:        t.name,
+		Desc:        t.desc,
+		ParamsOneOf: schema.NewParamsOneOfByParams(t.params),
+	}, nil
+}
+
+func (t *einoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
+	args := map[string]any{}
+	trimmed := strings.TrimSpace(argumentsInJSON)
+	if trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &args); err != nil {
+			return "", fmt.Errorf("invalid arguments: %w", err)
+		}
+	}
+
+	result, err := t.runtime.Execute(ctx, t.name, args)
+	if err != nil {
+		if strings.TrimSpace(result.Output) != "" {
+			return "", fmt.Errorf("%w: %s", err, result.Output)
+		}
+		return "", err
+	}
+	if result.Output == "" {
+		return "(command completed with no output)", nil
+	}
+	return result.Output, nil
+}
+

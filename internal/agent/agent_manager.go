@@ -11,6 +11,7 @@ import (
 	"mini-clawdbot/internal/bus"
 	"mini-clawdbot/internal/router"
 	"mini-clawdbot/internal/session"
+	"mini-clawdbot/internal/toolruntime"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -253,7 +254,8 @@ func (m *AgentManager) handleInbound(ctx context.Context, key bus.SessionKey, in
 	m.store.Add(key, userMsg)
 
 	history := m.store.ContextMessages(key, m.cfg.MaxContextMsgs)
-	finalMsg, trace, err := m.runner.RunWithTrace(ctx, history)
+	execCtx := toolruntime.WithExecutionContext(ctx, key, inbound.TraceID)
+	finalMsg, trace, err := m.runner.RunWithTrace(execCtx, history)
 	if err != nil {
 		_ = m.store.RecordEvent(ctx, key, session.EventError, map[string]any{
 			"stage":   "agent_run",

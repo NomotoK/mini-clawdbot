@@ -15,10 +15,14 @@ import (
 	"mini-clawdbot/internal/bus"
 	"mini-clawdbot/internal/channels"
 	"mini-clawdbot/internal/config"
+	"mini-clawdbot/internal/cron"
+	"mini-clawdbot/internal/gateway"
 	"mini-clawdbot/internal/llm"
 	"mini-clawdbot/internal/router"
+	"mini-clawdbot/internal/service"
 	"mini-clawdbot/internal/session"
 	"mini-clawdbot/internal/tools"
+	"mini-clawdbot/internal/toolruntime"
 )
 
 // Options 描述应用初始化时的可选参数。
@@ -39,6 +43,11 @@ type App struct {
 	bus          *bus.MessageBus
 	channelMgr   *channels.ChannelManager
 	agentMgr     *agent.AgentManager
+	toolRuntime  *toolruntime.Runtime
+	cronSvc      *cron.Service
+	gateway      *gateway.Server
+	gatewayOn    bool
+	supervisor   *service.Supervisor
 	sessionStore session.Store
 	cfg          config.Config
 }
@@ -81,7 +90,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		return nil, err
 	}
 
-	a, err := NewWithDependencies(ctx, chatModel, opts.MaxStep, wd)
+	a, err := newWithDependenciesAndService(ctx, chatModel, opts.MaxStep, wd, cfg.Service)
 	if err != nil {
 		return nil, err
 	}
@@ -103,11 +112,28 @@ func New(ctx context.Context, opts Options) (*App, error) {
 // - *App: 应用实例
 // - error: 参数非法或依赖构建失败时返回
 func NewWithDependencies(ctx context.Context, chatModel model.ToolCallingChatModel, maxStep int, workingDir string) (*App, error) {
+	return newWithDependenciesAndService(ctx, chatModel, maxStep, workingDir, config.ServiceConfig{})
+}
+
+func newWithDependenciesAndService(ctx context.Context, chatModel model.ToolCallingChatModel, maxStep int, workingDir string, svcCfg config.ServiceConfig) (*App, error) {
 	if strings.TrimSpace(workingDir) == "" {
 		return nil, fmt.Errorf("working directory is required")
 	}
 
-	toolList, err := tools.BuildMVPTools(workingDir)
+	messageBus := bus.NewMessageBus(bus.Config{})
+	store, err := session.NewJSONLStore(session.JSONLStoreConfig{RootDir: workingDir})
+	if err != nil {
+		return nil, fmt.Errorf("init session jsonl store: %w", err)
+	}
+	auditSink := &compositeAuditSink{store: store, bus: messageBus}
+	toolRuntime, err := toolruntime.BuildDefaultRuntime(toolruntime.DefaultRuntimeConfig{
+		WorkingDir:   workingDir,
+		EnableDocker: svcCfg.Tools.EnableDocker,
+	}, auditSink)
+	if err != nil {
+		return nil, fmt.Errorf("init tool runtime: %w", err)
+	}
+	toolList, toolRuntime, err := tools.BuildMVPTools(workingDir, toolRuntime)
 	if err != nil {
 		return nil, err
 	}
@@ -115,12 +141,6 @@ func NewWithDependencies(ctx context.Context, chatModel model.ToolCallingChatMod
 	runner, err := agent.NewReactRunner(ctx, chatModel, toolList, maxStep)
 	if err != nil {
 		return nil, err
-	}
-
-	messageBus := bus.NewMessageBus(bus.Config{})
-	store, err := session.NewJSONLStore(session.JSONLStoreConfig{RootDir: workingDir})
-	if err != nil {
-		return nil, fmt.Errorf("init session jsonl store: %w", err)
 	}
 	sessionRouter := router.NewSessionRouter()
 	channelMgr := channels.NewChannelManager(messageBus)
@@ -131,15 +151,38 @@ func NewWithDependencies(ctx context.Context, chatModel model.ToolCallingChatMod
 		store,
 		agent.ManagerConfig{},
 	)
+	cronSvc, err := cron.NewService(cron.Config{
+		RootDir:      workingDir,
+		PollInterval: time.Second,
+	}, messageBus, toolRuntime)
+	if err != nil {
+		return nil, fmt.Errorf("init cron service: %w", err)
+	}
+	var gw *gateway.Server
+	gatewayOn := svcCfg.Gateway.Enabled
+	if gatewayOn {
+		gwCfg := gateway.Config{
+			Host:      svcCfg.Gateway.Host,
+			Port:      svcCfg.Gateway.Port,
+			AuthToken: svcCfg.Gateway.AuthToken,
+		}
+		gw = gateway.NewServer(gwCfg, messageBus, store, channelMgr, cronSvc)
+	}
 
-	return &App{
+	app := &App{
 		runner:       runner,
 		session:      session.NewMemorySession(),
 		bus:          messageBus,
 		channelMgr:   channelMgr,
 		agentMgr:     agentMgr,
+		toolRuntime:  toolRuntime,
+		cronSvc:      cronSvc,
+		gateway:      gw,
+		gatewayOn:    gatewayOn,
 		sessionStore: store,
-	}, nil
+	}
+	app.supervisor = app.buildSupervisor()
+	return app, nil
 }
 
 // RegisterConfiguredChannels 根据当前配置注册内置渠道适配器。
@@ -213,33 +256,30 @@ func (a *App) RunOnce(ctx context.Context, userInput string) (string, error) {
 
 // Serve 启动常驻服务链路（ChannelManager + AgentManager）。
 func (a *App) Serve(ctx context.Context) error {
-	if a.channelMgr == nil || a.agentMgr == nil || a.bus == nil || a.sessionStore == nil {
+	if a.channelMgr == nil || a.agentMgr == nil || a.bus == nil || a.sessionStore == nil || a.supervisor == nil {
 		return errors.New("app serve dependencies are not ready")
 	}
-
-	if err := a.agentMgr.Start(ctx); err != nil {
-		return fmt.Errorf("start agent manager: %w", err)
-	}
-	if err := a.channelMgr.Start(ctx); err != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = a.agentMgr.Stop(stopCtx)
-		return fmt.Errorf("start channel manager: %w", err)
-	}
-
-	<-ctx.Done()
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_ = a.channelMgr.Stop(stopCtx)
-	_ = a.agentMgr.Stop(stopCtx)
-	_ = a.bus.Close()
-	return nil
+	return a.supervisor.Run(ctx)
 }
 
 // Bus 返回应用总线实例，用于外部注入或测试。
 func (a *App) Bus() *bus.MessageBus {
 	return a.bus
+}
+
+// Supervisor 返回服务监督器。
+func (a *App) Supervisor() *service.Supervisor {
+	return a.supervisor
+}
+
+// Gateway 返回网关服务实例。
+func (a *App) Gateway() *gateway.Server {
+	return a.gateway
+}
+
+// CronService 返回 cron 服务实例。
+func (a *App) CronService() *cron.Service {
+	return a.cronSvc
 }
 
 // ChannelManager 返回渠道管理器，用于注册 adapter。
@@ -293,4 +333,104 @@ func ResolveProjectRoot(start string) (string, error) {
 		}
 		cur = parent
 	}
+}
+
+func (a *App) buildSupervisor() *service.Supervisor {
+	components := []service.NamedComponent{
+		{
+			Name: "bus",
+			Component: service.FuncComponent{
+				NameValue: "bus",
+				StopFn: func(context.Context) error {
+					return a.bus.Close()
+				},
+				HealthFn: func(context.Context) service.HealthStatus {
+					if a.bus == nil || a.bus.IsClosed() {
+						return service.HealthStatus{Name: "bus", Status: service.StatusStopped}
+					}
+					return service.HealthStatus{Name: "bus", Status: service.StatusReady}
+				},
+			},
+		},
+		{
+			Name: "session_store",
+			Component: service.FuncComponent{
+				NameValue: "session_store",
+				InitFn: func(ctx context.Context) error {
+					return a.sessionStore.Recover(ctx)
+				},
+				HealthFn: func(context.Context) service.HealthStatus {
+					return service.HealthStatus{Name: "session_store", Status: service.StatusReady}
+				},
+			},
+		},
+		{
+			Name: "tool_runtime",
+			Component: service.FuncComponent{
+				NameValue: "tool_runtime",
+				HealthFn: func(context.Context) service.HealthStatus {
+					if a.toolRuntime == nil {
+						return service.HealthStatus{Name: "tool_runtime", Status: service.StatusStopped}
+					}
+					return service.HealthStatus{
+						Name:   "tool_runtime",
+						Status: service.StatusReady,
+						Details: map[string]any{
+							"tool_count": len(a.toolRuntime.List()),
+						},
+					}
+				},
+			},
+		},
+		{
+			Name: "agent_manager",
+			Component: service.FuncComponent{
+				NameValue: "agent_manager",
+				StartFn:   a.agentMgr.Start,
+				StopFn:    a.agentMgr.Stop,
+				HealthFn: func(context.Context) service.HealthStatus {
+					return service.HealthStatus{
+						Name:   "agent_manager",
+						Status: service.StatusReady,
+					}
+				},
+			},
+		},
+		{
+			Name: "channel_manager",
+			Component: service.FuncComponent{
+				NameValue: "channel_manager",
+				StartFn:   a.channelMgr.Start,
+				StopFn:    a.channelMgr.Stop,
+				HealthFn: func(context.Context) service.HealthStatus {
+					return service.HealthStatus{Name: "channel_manager", Status: service.StatusReady}
+				},
+			},
+		},
+		{
+			Name: "cron_service",
+			Component: service.FuncComponent{
+				NameValue: "cron_service",
+				StartFn:   a.cronSvc.Start,
+				StopFn:    a.cronSvc.Stop,
+				HealthFn:  a.cronSvc.Health,
+			},
+		},
+	}
+	if a.gatewayOn && a.gateway != nil {
+		components = append(components, service.NamedComponent{
+			Name: "gateway",
+			Component: service.FuncComponent{
+				NameValue: "gateway",
+				StartFn:   a.gateway.Start,
+				StopFn:    a.gateway.Stop,
+				HealthFn:  a.gateway.Health,
+			},
+		})
+	}
+	sup := service.NewSupervisor(service.SupervisorConfig{}, components...)
+	if a.gatewayOn && a.gateway != nil {
+		a.gateway.SetHealthProvider(sup.Health)
+	}
+	return sup
 }

@@ -46,7 +46,7 @@ func newTestRunner(t *testing.T) *ReactRunner {
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello"), 0o644); err != nil {
 		t.Fatalf("write test file: %v", err)
 	}
-	toolList, err := tools.BuildMVPTools(root)
+	toolList, _, err := tools.BuildMVPTools(root, nil)
 	if err != nil {
 		t.Fatalf("build tools: %v", err)
 	}

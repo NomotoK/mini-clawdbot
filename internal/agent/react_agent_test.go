@@ -82,7 +82,7 @@ func TestRunMaxStepExceeded(t *testing.T) {
 		t.Fatalf("write readme: %v", err)
 	}
 
-	toolList, err := tools.BuildMVPTools(root)
+	toolList, _, err := tools.BuildMVPTools(root, nil)
 	if err != nil {
 		t.Fatalf("build tools: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestRunWithTraceCollectsToolAndLLMEvents(t *testing.T) {
 		t.Fatalf("write readme: %v", err)
 	}
 
-	toolList, err := tools.BuildMVPTools(root)
+	toolList, _, err := tools.BuildMVPTools(root, nil)
 	if err != nil {
 		t.Fatalf("build tools: %v", err)
 	}
